@@ -14,7 +14,7 @@ class WallpaperWindow: NSWindow {
                   defer: false)
         
         // Basic window setup
-        self.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(CGWindowLevelKey.desktopWindow)))
+        self.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         self.backgroundColor = .clear
         self.isOpaque = false
         self.hasShadow = false
@@ -25,12 +25,13 @@ class WallpaperWindow: NSWindow {
     }
     
     private func setupPlayer(with path: String) {
-        // Create an asset with limited options for memory efficiency
-        let asset = AVAsset(url: URL(fileURLWithPath: path))
+        let url = URL(fileURLWithPath: path)
+        let asset = AVAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
         
         // Create player and optimize for memory
-        player = AVPlayer(playerItem: playerItem)
+        let queuePlayer = AVQueuePlayer(playerItem: playerItem)
+        self.player = queuePlayer
         player?.automaticallyWaitsToMinimizeStalling = false
         
         // Create and configure player layer
@@ -41,12 +42,14 @@ class WallpaperWindow: NSWindow {
         
         // Add player layer to window
         self.contentView?.wantsLayer = true
-        self.contentView?.layer?.addSublayer(playerLayer!)
+        if let layer = playerLayer {
+            self.contentView?.layer?.addSublayer(layer)
+        }
         
         // Setup efficient looping
-        playerLooper = AVPlayerLooper(player: player!, templateItem: playerItem)
+        playerLooper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
         
-        // Optimize playback
+        // Start playback
         player?.play()
     }
     
@@ -67,4 +70,4 @@ class WallpaperWindow: NSWindow {
         playerLayer?.removeFromSuperlayer()
         playerLayer = nil
     }
-} 
+}
