@@ -6,6 +6,7 @@ class SettingsWindow: NSWindow {
     private var autoStartCheckbox: NSButton!
     private var previewView: NSView!
     private var player: AVPlayer?
+    private var playerLayer: AVPlayerLayer?
     
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
@@ -81,7 +82,7 @@ class SettingsWindow: NSWindow {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowedContentTypes = [.movie, .video]
+        panel.allowedFileTypes = ["mp4", "mov", "m4v", "mpg", "mpeg"]
         
         panel.beginSheetModal(for: self) { [weak self] response in
             if response == .OK, let url = panel.url {
@@ -93,24 +94,33 @@ class SettingsWindow: NSWindow {
     
     private func setupVideoPreview(path: String) {
         // Remove existing player layer if any
-        previewView.layer?.sublayers?.removeAll()
+        playerLayer?.removeFromSuperlayer()
         
         let url = URL(fileURLWithPath: path)
         player = AVPlayer(url: url)
         
-        let playerLayer = AVPlayerLayer(player: player)
-        playerLayer.frame = previewView.bounds
-        playerLayer.videoGravity = .resizeAspect
-        previewView.layer?.addSublayer(playerLayer)
+        playerLayer = AVPlayerLayer(player: player)
+        playerLayer?.frame = previewView.bounds
+        playerLayer?.videoGravity = .resizeAspect
         
-        // Loop video
-        NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime,
-                                            object: player?.currentItem,
-                                            queue: .main) { [weak self] _ in
-            self?.player?.seek(to: .zero)
-            self?.player?.play()
+        if let layer = playerLayer {
+            previewView.layer?.addSublayer(layer)
         }
         
+        // Loop video
+        NotificationCenter.default.removeObserver(self)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(replayVideo),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: player?.currentItem
+        )
+        
+        player?.play()
+    }
+    
+    @objc private func replayVideo() {
+        player?.seek(to: .zero)
         player?.play()
     }
     
@@ -126,44 +136,6 @@ class SettingsWindow: NSWindow {
     }
     
     private func setupAutoStart() {
-        // Get the app's bundle identifier
-        guard let bundleId = Bundle.main.bundleIdentifier else { return }
-        
+        let bundlePath = Bundle.main.bundlePath
         let task = Process()
-        task.launchPath = "/usr/bin/osascript"
-        task.arguments = ["-e", """
-            tell application "System Events"
-                make login item at end with properties {path:"/Applications/Live Wallpaper.app", hidden:false}
-            end tell
-            """]
-        
-        try? task.run()
-    }
-    
-    private func removeAutoStart() {
-        let task = Process()
-        task.launchPath = "/usr/bin/osascript"
-        task.arguments = ["-e", """
-            tell application "System Events"
-                delete login item "Live Wallpaper"
-            end tell
-            """]
-        
-        try? task.run()
-    }
-    
-    @objc private func applySettings() {
-        let videoPath = videoPathLabel.stringValue
-        if FileManager.default.fileExists(atPath: videoPath) {
-            UserDefaults.standard.set(videoPath, forKey: "videoPath")
-            NotificationCenter.default.post(name: .init("VideoPathChanged"), object: videoPath)
-        }
-        
-        self.close()
-    }
-    
-    deinit {
-        player?.pause()
-        player = nil
-    }
-}
+        task.launchPath = "/usr/bin/os
