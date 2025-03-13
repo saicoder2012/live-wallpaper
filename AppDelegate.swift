@@ -27,7 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleVideoPathChange),
-            name: .init("VideoPathChanged"),
+            name: Notification.Name("VideoPathChanged"),
             object: nil
         )
         
