@@ -1,11 +1,11 @@
 import SwiftUI
-import UniformTypeIdentifiers
+import AVFoundation
+import AppKit
 
 struct ContentView: View {
     @State private var isShowingFilePicker = false
     @State private var currentVideoPath: String? = UserDefaults.standard.string(forKey: "videoPath")
     @State private var isAutoStartEnabled = UserDefaults.standard.bool(forKey: "autoStart")
-    @Environment(\.openURL) private var openURL
     
     var body: some View {
         VStack(spacing: 16) {
@@ -28,7 +28,9 @@ struct ContentView: View {
                 .cornerRadius(8)
             }
             
-            Button(action: { isShowingFilePicker = true }) {
+            Button {
+                selectVideoFile()
+            } label: {
                 Label(
                     currentVideoPath == nil ? "Select Video" : "Change Video",
                     systemImage: "video.badge.plus"
@@ -44,11 +46,11 @@ struct ContentView: View {
                 }
             
             if currentVideoPath != nil {
-                Button(action: {
+                Button {
                     if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
                         appDelegate.startLiveWallpaper(path: currentVideoPath!)
                     }
-                }) {
+                } label: {
                     Label("Apply Wallpaper", systemImage: "play.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -58,7 +60,9 @@ struct ContentView: View {
             
             Divider()
             
-            Button(action: { NSApplication.shared.terminate(nil) }) {
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
                 Label("Quit", systemImage: "power")
                     .frame(maxWidth: .infinity)
             }
@@ -67,46 +71,64 @@ struct ContentView: View {
         }
         .padding()
         .frame(width: 300)
-        .fileImporter(
-            isPresented: $isShowingFilePicker,
-            allowedContentTypes: [.movie, .video],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    currentVideoPath = url.path
-                    UserDefaults.standard.set(url.path, forKey: "videoPath")
-                    if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
-                        appDelegate.startLiveWallpaper(path: url.path)
-                    }
+    }
+    
+    // File Picker functionality
+    func selectVideoFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedFileTypes = ["mp4", "mov", "m4v", "mpg", "mpeg"]
+        
+        panel.begin { result in
+            if result == .OK, let url = panel.url {
+                self.currentVideoPath = url.path
+                UserDefaults.standard.set(url.path, forKey: "videoPath")
+                
+                if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+                    appDelegate.startLiveWallpaper(path: url.path)
                 }
-            case .failure(let error):
-                print("Error selecting file: \(error.localizedDescription)")
             }
         }
     }
     
     private func setupLoginItem(enabled: Bool) {
-        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
-        
         if enabled {
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = false
-            configuration.addsToRecentItems = false
-            configuration.hidesOthers = false
+            // Add login item
+            let bundlePath = Bundle.main.bundlePath
+            let scriptContent = "tell application \"System Events\" to make login item at end with properties {path:\"\(bundlePath)\", hidden:false}"
             
-            NSWorkspace.shared.openApplication(
-                at: Bundle.main.bundleURL,
-                configuration: configuration
-            ) { _, error in
-                if let error = error {
-                    print("Error setting up login item: \(error)")
-                }
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments = ["-e", scriptContent]
+            
+            do {
+                try task.run()
+            } catch {
+                print("Error setting up login item: \(error)")
             }
         } else {
             // Remove login item
-            // This is handled by the system when toggling off
+            let bundleName = (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "Live Wallpaper"
+            let scriptContent = "tell application \"System Events\" to delete (every login item whose name is \"\(bundleName)\")"
+            
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments = ["-e", scriptContent]
+            
+            do {
+                try task.run()
+            } catch {
+                print("Error removing login item: \(error)")
+            }
         }
+    }
+}
+
+// PreviewProvider for Xcode canvas
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
     }
 }
