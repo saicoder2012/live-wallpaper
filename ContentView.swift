@@ -1,7 +1,14 @@
+//
+//  LiveWallpaperApp.swift
+//  Created by Octexa
+//
+
 import SwiftUI
 import AppKit
-import AVFoundation
+import AVKit
 import SwiftData
+import AVFoundation
+import CoreAudio
 import CoreImage
 import ScreenCaptureKit
 import IOKit.ps
@@ -39,7 +46,7 @@ class WallpaperSettings {
     }
 }
 
-// MARK: - Battery Monitor (same as before)
+// MARK: - Battery Monitor
 class BatteryMonitor {
     static let shared = BatteryMonitor()
     private var timer: Timer?
@@ -58,12 +65,12 @@ class BatteryMonitor {
     
     private func checkBatteryStatus() {
         if let powerSource = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-           let sourcesCF = IOPSCopyPowerSourcesList(powerSource)?.takeRetainedValue() as? [CFTypeRef] {
+           let sources = IOPSCopyPowerSourcesList(powerSource)?.takeRetainedValue() as? [CFTypeRef] {
             
-            for source in sourcesCF {
-                if let descriptionCF = IOPSGetPowerSourceDescription(powerSource, source)?.takeUnretainedValue() as? [String: Any] {
-                    let isCharging = descriptionCF[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
-                    let batteryLevel = Double(descriptionCF[kIOPSCurrentCapacityKey] as? Int ?? 100)
+            for source in sources {
+                if let description = IOPSGetPowerSourceDescription(powerSource, source)?.takeUnretainedValue() as? [String: Any] {
+                    let isCharging = description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
+                    let batteryLevel = Double(description[kIOPSCurrentCapacityKey] as? Int ?? 100)
                     let percentage = batteryLevel
                     
                     DispatchQueue.main.async {
@@ -80,7 +87,7 @@ class BatteryMonitor {
     }
 }
 
-// MARK: - Persistence Manager (same as before)
+// MARK: - Persistence Manager
 class PersistenceManager {
     static let shared = PersistenceManager()
     
@@ -127,65 +134,280 @@ class PersistenceManager {
     }
 }
 
-// MARK: - ModelManager, ColorSamplingManager, etc. (same as before)
-//  ... (Keep your existing classes and logic: ModelManager, ColorSamplingManager, 
-//       WallpaperWindowManager, etc. You just won't be using a separate NSWindow 
-//       for the settings UI. We'll embed ContentView in a popover.)
+// MARK: - Model Manager
+class ModelManager: ObservableObject {
+    static let shared = ModelManager()
+    @Published var settings: WallpaperSettings?
+    private var modelContext: ModelContext?
+    
+    private init() {}
+    
+    func initialize(with context: ModelContext) {
+        self.modelContext = context
+        loadSettings()
+    }
+    
+    func loadSettings() {
+        let descriptor = FetchDescriptor<WallpaperSettings>()
+        
+        do {
+            let results = try modelContext?.fetch(descriptor)
+            settings = results?.first ?? createDefaultSettings()
+        } catch {
+            print("Error loading settings: \(error.localizedDescription)")
+            settings = createDefaultSettings()
+        }
+    }
+    
+    private func createDefaultSettings() -> WallpaperSettings {
+        let newSettings = WallpaperSettings()
+        modelContext?.insert(newSettings)
+        try? modelContext?.save()
+        return newSettings
+    }
+    
+    func updateSettings() {
+        try? modelContext?.save()
+    }
+}
 
-// For brevity, assume the rest of your classes remain the same. 
-// The only difference is how we present the ContentView in a popover instead 
-// of a separate window. 
-//
-// The code below focuses on how to create a status item + popover. 
-// If you rely on a window for the wallpaper, keep that logic in 
-// WallpaperWindowManager. But the *settings UI* is now a popover.
+// MARK: - ColorSamplingManager
+class ColorSamplingManager {
+    static let shared = ColorSamplingManager()
+    
+    private init() {}
+    
+    func getDominantColor(from image: NSImage) -> NSColor {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return .systemBlue
+        }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let bitsPerComponent = 8
+        
+        var rawData = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
+        
+        guard let context = CGContext(
+            data: &rawData,
+            width: width,
+            height: height,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else {
+            return .systemBlue
+        }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        
+        var totalRed = 0
+        var totalGreen = 0
+        var totalBlue = 0
+        var totalPixels = 0
+        
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = (y * bytesPerRow) + (x * bytesPerPixel)
+                let alpha = CGFloat(rawData[offset + 3]) / 255.0
+                
+                if alpha > 0.1 {
+                    totalRed += Int(rawData[offset])
+                    totalGreen += Int(rawData[offset + 1])
+                    totalBlue += Int(rawData[offset + 2])
+                    totalPixels += 1
+                }
+            }
+        }
+        
+        guard totalPixels > 0 else {
+            return .systemBlue
+        }
+        
+        let averageRed = CGFloat(totalRed) / CGFloat(totalPixels) / 255.0
+        let averageGreen = CGFloat(totalGreen) / CGFloat(totalPixels) / 255.0
+        let averageBlue = CGFloat(totalBlue) / CGFloat(totalPixels) / 255.0
+        
+        return NSColor(red: averageRed, green: averageGreen, blue: averageBlue, alpha: 1.0)
+    }
+}
+
+// MARK: - PreviewPlayerManager
+class PreviewPlayerManager: ObservableObject {
+    @MainActor @Published private(set) var previewImage: NSImage?
+    private var player: AVPlayer?
+    private var playerLayer: AVPlayerLayer?
+    private var videoOutput: AVPlayerItemVideoOutput?
+    
+    @MainActor
+    func setupPreview(url: URL, completion: ((Data?) -> Void)? = nil) {
+        let asset = AVAsset(url: url)
+        let imageGenerator = AVAssetImageGenerator(asset: asset)
+        imageGenerator.appliesPreferredTrackTransform = true
+        
+        Task {
+            do {
+                // The new async call returns a tuple: (image: CGImage, actualTime: CMTime)
+                let (cgImage, _) = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
+                
+                // Create NSImage
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
+                
+                await MainActor.run {
+                    self.previewImage = nsImage
+                    if let tiffData = nsImage.tiffRepresentation,
+                       let bitmap = NSBitmapImageRep(data: tiffData),
+                       let thumbnailData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) {
+                        completion?(thumbnailData)
+                    } else {
+                        completion?(nil)
+                    }
+                }
+            } catch {
+                print("Could not generate thumbnail: \(error)")
+                await MainActor.run {
+                    self.previewImage = nil
+                    completion?(nil)
+                }
+            }
+        }
+        
+        cleanup()
+    }
+    
+    @MainActor
+    func setPreviewFromData(_ data: Data?) {
+        guard let data = data else {
+            previewImage = nil
+            return
+        }
+        
+        if let nsImage = NSImage(data: data) {
+            previewImage = nsImage
+        }
+    }
+    
+    func cleanup() {
+        Task { @MainActor in
+            player?.pause()
+            player = nil
+            playerLayer = nil
+            videoOutput = nil
+        }
+    }
+}
+
+// MARK: - MenuBarController (for other logic, if needed)
+class MenuBarController: ObservableObject {
+    // We won’t actually create an NSMenu here, but we can keep the class 
+    // for referencing in WallpaperWindowManager or if you want 
+    // other logic. 
+    //
+    // If you truly don't need it, you can remove it. 
+    // But let's keep it to avoid "Cannot find 'MenuBarController' in scope" errors.
+    
+    func updateIcon(isActive: Bool, color: NSColor? = nil) {
+        // No-op or implement your custom logic if needed
+    }
+}
+
+// MARK: - WallpaperWindowManager
+class WallpaperWindowManager: ObservableObject {
+    private var window: NSWindow?
+    private var playerView: AVPlayerView?
+    private var player: AVPlayer?
+    private var menuBarController: MenuBarController
+    private let colorSamplingManager = ColorSamplingManager.shared
+    private let batteryMonitor = BatteryMonitor.shared
+    private var wasPlayingBeforeLostFocus = false
+    
+    @Published var isPlaying: Bool = false
+    
+    init(menuBarController: MenuBarController) {
+        self.menuBarController = menuBarController
+        // If you have logic to create a wallpaper window, you can keep it. 
+        // Otherwise, remove or adapt it. 
+    }
+    
+    func start() {
+        // Start the wallpaper logic
+        isPlaying = true
+    }
+    
+    func stop() {
+        // Stop the wallpaper logic
+        isPlaying = false
+    }
+    
+    func togglePlayback() {
+        if isPlaying {
+            stop()
+        } else {
+            start()
+        }
+    }
+}
 
 // MARK: - ContentView
 struct ContentView: View {
-    // All your existing logic from your "ContentView" can remain
-    // exactly as is. The only difference is that it's displayed
-    // in a popover rather than in a window.
-    
-    // For example:
+    // For demonstration, we include references to 
+    // ModelManager, PreviewPlayerManager, and WallpaperWindowManager
     @Environment(\.modelContext) private var modelContext
-    @StateObject private var windowManager: WallpaperWindowManager
     @ObservedObject private var modelManager = ModelManager.shared
     @StateObject private var previewManager = PreviewPlayerManager()
+    @StateObject private var windowManager: WallpaperWindowManager
     
     init(windowManager: WallpaperWindowManager) {
         _windowManager = StateObject(wrappedValue: windowManager)
     }
     
     var body: some View {
-        VStack(spacing: 0) {
+        VStack {
             Text("Live Wallpaper Settings")
-                .font(.title3)
-                .padding()
+                .font(.headline)
+                .padding(.top)
             
-            // ... Your existing UI ...
-            // For example, a button to choose video, toggles, etc.
+            // Example toggle
+            Toggle("Auto-Start", isOn: Binding(
+                get: { modelManager.settings?.autoStart ?? false },
+                set: { newVal in
+                    modelManager.settings?.autoStart = newVal
+                    modelManager.updateSettings()
+                }
+            ))
+            .padding()
+            
+            Button(windowManager.isPlaying ? "Stop Wallpaper" : "Start Wallpaper") {
+                windowManager.togglePlayback()
+            }
+            .padding()
             
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
-            .padding(.top, 10)
+            .padding()
         }
-        .frame(width: 320, height: 480)
+        .frame(width: 320, height: 220)
         .onAppear {
             modelManager.initialize(with: modelContext)
-            // ...
         }
     }
 }
 
 // MARK: - PopoverController
-/// Manages an NSPopover that displays our SwiftUI ContentView.
 class PopoverController: NSObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
-    private let windowManager = WallpaperWindowManager(menuBarController: MenuBarController())
+    
+    // Create an instance of our manager classes
+    private let menuBarController = MenuBarController()
+    private let windowManager: WallpaperWindowManager
     
     override init() {
+        self.windowManager = WallpaperWindowManager(menuBarController: menuBarController)
         super.init()
         
         // 1) Create the status item (the menu bar icon).
@@ -195,24 +417,23 @@ class PopoverController: NSObject, NSPopoverDelegate {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "photo.fill", accessibilityDescription: "Wallpaper")
             button.image?.isTemplate = true
-            
-            // 3) Set the button's action to toggle the popover
             button.action = #selector(togglePopover(_:))
             button.target = self
         }
         
-        // 4) Create the NSPopover and embed ContentView
+        // 3) Create the NSPopover
         popover = NSPopover()
         popover.behavior = .transient
         popover.delegate = self
         
-        // Embed the SwiftUI ContentView in the popover
+        // 4) Embed SwiftUI ContentView in the popover
         let contentView = ContentView(windowManager: windowManager)
             .modelContainer(PersistenceManager.shared.createContainer())
         
-        popover.contentSize = NSSize(width: 320, height: 480)
-        popover.contentViewController = NSViewController()
-        popover.contentViewController?.view = NSHostingView(rootView: contentView)
+        popover.contentSize = NSSize(width: 320, height: 220)
+        let viewController = NSViewController()
+        viewController.view = NSHostingView(rootView: contentView)
+        popover.contentViewController = viewController
     }
     
     @objc func togglePopover(_ sender: Any?) {
@@ -221,45 +442,37 @@ class PopoverController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            // Show the popover, anchored to the status item button
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
     
-    // Optional: Close the popover if user clicks outside
     func popoverShouldClose(_ popover: NSPopover) -> Bool {
         true
     }
 }
 
-// MARK: - App Entry Point
-@main
-struct LiveWallpaperApp: App {
-    // We don't create a WindowGroup here. Instead, we set up
-    // our popover in the initializer (or somewhere) so that
-    // there's no main app window, just a menu bar item.
-    
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    var body: some Scene {
-        // We can have an empty scene or no scenes at all.
-        // If you want zero Dock icons, also set the LSUIElement 
-        // or "Application is agent" property in Info.plist.
-        Settings {
-            // Optionally empty
-            EmptyView()
-        }
-    }
-}
-
 // MARK: - AppDelegate
-/// We use an NSApplicationDelegate to set up the popover on launch.
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverController: PopoverController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Create the popover controller so it sets up the menu bar icon
         popoverController = PopoverController()
+    }
+}
+
+// MARK: - Main App
+@main
+struct LiveWallpaperApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
+    var body: some Scene {
+        // We don't create a WindowGroup here.
+        // The entire UI is in the popover, so no main window is needed.
+        Settings {
+            // Optionally empty
+            EmptyView()
+        }
     }
 }
