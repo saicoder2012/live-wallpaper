@@ -419,10 +419,8 @@ class WallpaperWindowManager: ObservableObject {
     }
     
     private func startColorSampling() {
-        // Ensure we only sample if adaptiveMenuBar is enabled
         guard let currentItem = player?.currentItem,
-              ModelManager.shared.settings?.adaptiveMenuBar == true
-        else {
+              ModelManager.shared.settings?.adaptiveMenuBar == true else {
             return
         }
         
@@ -431,18 +429,10 @@ class WallpaperWindowManager: ObservableObject {
         
         Task {
             do {
-                let time = CMTime(seconds: 0, preferredTimescale: 600)
-                let cgImageResult = try await imageGenerator.image(at: time)
+                // This returns a non-optional CGImage in newer Swift/macOS
+                let cgImage = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
                 
-                // Double-check the result is not nil
-                guard let cgImage = cgImageResult.image else {
-                    print("Image generator returned nil CGImage")
-                    await MainActor.run {
-                        self.menuBarController.updateIcon(isActive: true)
-                    }
-                    return
-                }
-                
+                // Convert CGImage to NSImage
                 let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 100, height: 100))
                 let dominantColor = ColorSamplingManager.shared.getDominantColor(from: nsImage)
                 
@@ -577,23 +567,15 @@ class PreviewPlayerManager: ObservableObject {
         
         Task {
             do {
-                let time = CMTime(seconds: 0, preferredTimescale: 600)
-                let cgImageResult = try await imageGenerator.image(at: time)
+                // This also returns a non-optional CGImage now
+                let cgImage = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
                 
-                // Check for nil
-                guard let cgImage = cgImageResult.image else {
-                    print("Nil CGImage from generator.")
-                    await MainActor.run {
-                        self.previewImage = nil
-                        completion?(nil)
-                    }
-                    return
-                }
-                
+                // Create NSImage directly
                 let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
+                
+                // Update preview
                 await MainActor.run {
                     self.previewImage = nsImage
-                    
                     if let tiffData = nsImage.tiffRepresentation,
                        let bitmap = NSBitmapImageRep(data: tiffData),
                        let thumbnailData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) {
