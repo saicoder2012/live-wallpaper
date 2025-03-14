@@ -429,8 +429,8 @@ class WallpaperWindowManager: ObservableObject {
         
         Task {
             do {
-                // This returns a non-optional CGImage in newer Swift/macOS
-                let cgImage = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
+                // The new async call returns a tuple: (image: CGImage, actualTime: CMTime)
+                let (cgImage, _) = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
                 
                 // Convert CGImage to NSImage
                 let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 100, height: 100))
@@ -567,8 +567,8 @@ class PreviewPlayerManager: ObservableObject {
         
         Task {
             do {
-                // This also returns a non-optional CGImage now
-                let cgImage = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
+                // The new async call returns a tuple: (image: CGImage, actualTime: CMTime)
+                let (cgImage, _) = try await imageGenerator.image(at: CMTime(seconds: 0, preferredTimescale: 600))
                 
                 // Create NSImage directly
                 let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
