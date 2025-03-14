@@ -25,7 +25,14 @@ class WallpaperSettings {
     var batteryLimitEnabled: Bool
     var batteryLimitPercentage: Double
     
-    init(lastUsedPath: String? = nil, autoStart: Bool = false, playbackMode: PlaybackMode = .loop, adaptiveMenuBar: Bool = true, thumbnailData: Data? = nil, batteryLimitEnabled: Bool = false, batteryLimitPercentage: Double = 20) {
+    init(lastUsedPath: String? = nil,
+         autoStart: Bool = false,
+         playbackMode: PlaybackMode = .loop,
+         adaptiveMenuBar: Bool = true,
+         thumbnailData: Data? = nil,
+         batteryLimitEnabled: Bool = false,
+         batteryLimitPercentage: Double = 20) {
+        
         self.lastUsedPath = lastUsedPath
         self.autoStart = autoStart
         self.playbackMode = playbackMode
@@ -59,12 +66,12 @@ class BatteryMonitor {
     
     private func checkBatteryStatus() {
         if let powerSource = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-           let sources = IOPSCopyPowerSourcesList(powerSource)?.takeRetainedValue() as? [CFTypeRef] {
+           let sourcesCF = IOPSCopyPowerSourcesList(powerSource)?.takeRetainedValue() as? [CFTypeRef] {
             
-            for source in sources {
-                if let description = IOPSGetPowerSourceDescription(powerSource, source)?.takeUnretainedValue() as? [String: Any] {
-                    let isCharging = description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
-                    let batteryLevel = Double(description[kIOPSCurrentCapacityKey] as? Int ?? 100)
+            for source in sourcesCF {
+                if let descriptionCF = IOPSGetPowerSourceDescription(powerSource, source)?.takeUnretainedValue() as? [String: Any] {
+                    let isCharging = descriptionCF[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
+                    let batteryLevel = Double(descriptionCF[kIOPSCurrentCapacityKey] as? Int ?? 100)
                     let percentage = batteryLevel
                     
                     DispatchQueue.main.async {
@@ -293,7 +300,6 @@ class MenuBarController: ObservableObject {
     @objc private func openSettings() {
         if let window = window {
             print("Settings window exists, attempting to open...")
-            // Restore window from minimized state
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -413,30 +419,40 @@ class WallpaperWindowManager: ObservableObject {
     }
     
     private func startColorSampling() {
-        guard let playerView = playerView,
-              ModelManager.shared.settings?.adaptiveMenuBar == true else {
+        // Ensure we only sample if adaptiveMenuBar is enabled
+        guard let currentItem = player?.currentItem,
+              ModelManager.shared.settings?.adaptiveMenuBar == true
+        else {
             return
         }
         
-        if let currentItem = player?.currentItem {
-            let imageGenerator = AVAssetImageGenerator(asset: currentItem.asset)
-            imageGenerator.appliesPreferredTrackTransform = true
-            
-            Task {
-                do {
-                    let time = CMTime(seconds: 0, preferredTimescale: 600)
-                    let cgImage = try await imageGenerator.image(at: time).image
-                    let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 100, height: 100))
-                    
-                    let dominantColor = ColorSamplingManager.shared.getDominantColor(from: nsImage)
-                    await MainActor.run {
-                        self.menuBarController.updateIcon(isActive: true, color: dominantColor)
-                    }
-                } catch {
-                    print("Error generating thumbnail for color sampling: \(error)")
+        let imageGenerator = AVAssetImageGenerator(asset: currentItem.asset)
+        imageGenerator.appliesPreferredTrackTransform = true
+        
+        Task {
+            do {
+                let time = CMTime(seconds: 0, preferredTimescale: 600)
+                let cgImageResult = try await imageGenerator.image(at: time)
+                
+                // Double-check the result is not nil
+                guard let cgImage = cgImageResult.image else {
+                    print("Image generator returned nil CGImage")
                     await MainActor.run {
                         self.menuBarController.updateIcon(isActive: true)
                     }
+                    return
+                }
+                
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 100, height: 100))
+                let dominantColor = ColorSamplingManager.shared.getDominantColor(from: nsImage)
+                
+                await MainActor.run {
+                    self.menuBarController.updateIcon(isActive: true, color: dominantColor)
+                }
+            } catch {
+                print("Error generating thumbnail for color sampling: \(error)")
+                await MainActor.run {
+                    self.menuBarController.updateIcon(isActive: true)
                 }
             }
         }
@@ -449,6 +465,8 @@ class WallpaperWindowManager: ObservableObject {
     func setVideo(url: URL) {
         let asset = AVAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
+        
+        // Safely configure audio settings
         configureAudioSettings(for: playerItem, with: asset)
         setupPlayer(with: playerItem)
     }
@@ -457,15 +475,18 @@ class WallpaperWindowManager: ObservableObject {
         Task {
             do {
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+                // Make sure we have at least one track
+                guard let audioTrack = audioTracks.first else {
+                    print("No audio track found; skipping audio mix setup.")
+                    return
+                }
                 
-                if let audioTrack = audioTracks.first {
-                    await MainActor.run {
-                        let audioMix = AVMutableAudioMix()
-                        let audioInputParameters = AVMutableAudioMixInputParameters(track: audioTrack)
-                        audioInputParameters.setVolume(0, at: .zero)
-                        audioMix.inputParameters = [audioInputParameters]
-                        playerItem.audioMix = audioMix
-                    }
+                await MainActor.run {
+                    let audioMix = AVMutableAudioMix()
+                    let audioInputParameters = AVMutableAudioMixInputParameters(track: audioTrack)
+                    audioInputParameters.setVolume(0, at: .zero)
+                    audioMix.inputParameters = [audioInputParameters]
+                    playerItem.audioMix = audioMix
                 }
             } catch {
                 print("Error loading audio tracks: \(error.localizedDescription)")
@@ -557,9 +578,19 @@ class PreviewPlayerManager: ObservableObject {
         Task {
             do {
                 let time = CMTime(seconds: 0, preferredTimescale: 600)
-                let cgImage = try await imageGenerator.image(at: time).image
-                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
+                let cgImageResult = try await imageGenerator.image(at: time)
                 
+                // Check for nil
+                guard let cgImage = cgImageResult.image else {
+                    print("Nil CGImage from generator.")
+                    await MainActor.run {
+                        self.previewImage = nil
+                        completion?(nil)
+                    }
+                    return
+                }
+                
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
                 await MainActor.run {
                     self.previewImage = nsImage
                     
@@ -720,24 +751,30 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             
                             VStack(spacing: 4) {
-                                ModernToggleRow("Auto-start on launch", systemImage: "clock", isOn: Binding(
-                                    get: { modelManager.settings?.autoStart ?? false },
-                                    set: { updateAutoStart($0) }
-                                ))
+                                ModernToggleRow("Auto-start on launch",
+                                                systemImage: "clock",
+                                                isOn: Binding(
+                                                    get: { modelManager.settings?.autoStart ?? false },
+                                                    set: { updateAutoStart($0) }
+                                                ))
                                 
                                 Divider()
                                 
-                                ModernToggleRow("Adaptive menu bar", systemImage: "paintpalette", isOn: Binding(
-                                    get: { modelManager.settings?.adaptiveMenuBar ?? true },
-                                    set: { updateAdaptiveMenuBar($0) }
-                                ))
+                                ModernToggleRow("Adaptive menu bar",
+                                                systemImage: "paintpalette",
+                                                isOn: Binding(
+                                                    get: { modelManager.settings?.adaptiveMenuBar ?? true },
+                                                    set: { updateAdaptiveMenuBar($0) }
+                                                ))
                                 
                                 Divider()
                                 
-                                ModernToggleRow("Battery limit", systemImage: "battery.75", isOn: Binding(
-                                    get: { modelManager.settings?.batteryLimitEnabled ?? false },
-                                    set: { updateBatteryLimit($0) }
-                                ))
+                                ModernToggleRow("Battery limit",
+                                                systemImage: "battery.75",
+                                                isOn: Binding(
+                                                    get: { modelManager.settings?.batteryLimitEnabled ?? false },
+                                                    set: { updateBatteryLimit($0) }
+                                                ))
                                 
                                 if modelManager.settings?.batteryLimitEnabled == true {
                                     VStack(spacing: 8) {
@@ -822,7 +859,7 @@ struct ContentView: View {
             
             do {
                 var isStale = false
-                let url = try URL(
+                let resolvedURL = try URL(
                     resolvingBookmarkData: bookmarkData,
                     options: .withSecurityScope,
                     relativeTo: nil,
@@ -830,21 +867,21 @@ struct ContentView: View {
                 )
                 
                 // Start accessing the security-scoped resource
-                guard url.startAccessingSecurityScopedResource() else {
+                guard resolvedURL.startAccessingSecurityScopedResource() else {
                     print("Failed to access the video file")
                     return
                 }
                 
                 // Update the UI and start playback if autoStart is enabled
                 previewManager.setPreviewFromData(modelManager.settings?.thumbnailData)
-                windowManager.setVideo(url: url)
+                windowManager.setVideo(url: resolvedURL)
                 
                 if modelManager.settings?.autoStart == true {
                     windowManager.start()
                 }
                 
                 // Stop accessing the security-scoped resource when done
-                url.stopAccessingSecurityScopedResource()
+                resolvedURL.stopAccessingSecurityScopedResource()
             } catch {
                 print("Failed to resolve bookmark: \(error)")
             }
