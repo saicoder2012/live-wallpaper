@@ -291,10 +291,11 @@ class MenuBarController: ObservableObject {
     }
     
     @objc private func openSettings() {
-        // Use orderFrontRegardless to ensure the window comes to front
         if let window = window {
             print("Settings window exists, attempting to open...")
-            window.orderFrontRegardless()
+            // Restore window from minimized state
+            window.deminiaturize(nil)
+            window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
             print("No settings window found")
