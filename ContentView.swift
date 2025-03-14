@@ -234,41 +234,32 @@ class ModelManager: ObservableObject {
 
 // MARK: - Menu Bar Controller
 class MenuBarController: ObservableObject {
-    @Published var isPlaying: Bool = false
-    private var windowManager: WallpaperWindowManager?
-    private var settingsWindow: NSWindow?
+    private var statusItem: NSStatusItem?
+    @Published var isVisible = true
     
-    func setWindowManager(_ manager: WallpaperWindowManager) {
-        self.windowManager = manager
+    init() {
+        setupStatusItem()
     }
     
-    func setWindow(_ window: NSWindow) {
-        print("Setting window in MenuBarController")
-        self.settingsWindow = window
-        print("Window stored successfully")
-    }
-    
-    func togglePlayback() {
-        windowManager?.togglePlayback()
-    }
-    
-    func updateMenuPlaybackState(isPlaying: Bool) {
-        self.isPlaying = isPlaying
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateIcon(isActive: false)
     }
     
     func updateIcon(isActive: Bool, color: NSColor? = nil) {
-        // This will be handled by the MenuBarExtra
+        let imageName = isActive ? "play.circle.fill" : "play.circle"
+        guard let image = NSImage(systemSymbolName: imageName, accessibilityDescription: isActive ? "Active" : "Inactive") else { return }
+        
+        if let color = color {
+            statusItem?.button?.contentTintColor = color
+        }
+        
+        statusItem?.button?.image = image
+        statusItem?.button?.image?.isTemplate = color == nil
     }
     
-    func showSettings() {
-        print("Attempting to show settings window")
-        if let window = settingsWindow {
-            print("Found settings window, showing it")
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } else {
-            print("No settings window found")
-        }
+    func setMenu(_ menu: NSMenu) {
+        statusItem?.menu = menu
     }
 }
 
@@ -284,11 +275,11 @@ class WallpaperWindowManager: ObservableObject {
     
     @Published var isPlaying: Bool = false {
         didSet {
-            menuBarController.updateMenuPlaybackState(isPlaying: isPlaying)
             if isPlaying {
                 startColorSampling()
             } else {
                 stopColorSampling()
+                menuBarController.updateIcon(isActive: false)
             }
         }
     }
@@ -362,15 +353,26 @@ class WallpaperWindowManager: ObservableObject {
     }
     
     @objc private func handleActiveAppChanged(_ notification: Notification) {
-        if wasPlayingBeforeLostFocus {
-            resumePlayback()
-            wasPlayingBeforeLostFocus = false
+        guard let activeApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+        
+        if activeApp.bundleIdentifier == "com.apple.finder" {
+            if wasPlayingBeforeLostFocus {
+                resumePlayback()
+            }
+        } else {
+            if isPlaying {
+                wasPlayingBeforeLostFocus = true
+                pausePlayback()
+            }
         }
     }
     
     private func startColorSampling() {
         guard let playerView = playerView,
               ModelManager.shared.settings?.adaptiveMenuBar == true else {
+            menuBarController.updateIcon(isActive: true)
             return
         }
         
@@ -439,553 +441,354 @@ class WallpaperWindowManager: ObservableObject {
         }
         
         player?.allowsExternalPlayback = false
-        setupLooping(for: playerItem)
-    }
-    
-    private func setupLooping(for playerItem: AVPlayerItem) {
-        NotificationCenter.default.removeObserver(self)
-        NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem,
-            queue: .main
-        ) { [weak self] _ in
-            self?.player?.seek(to: .zero)
-            self?.player?.play()
-        }
-    }
-    
-    private func pausePlayback() {
-        player?.pause()
-    }
-    
-    private func resumePlayback() {
-        player?.play()
-        wasPlayingBeforeLostFocus = false
-    }
-    
-    func start() {
-        window?.orderFront(nil)
-        player?.play()
-        isPlaying = true
-    }
-    
-    func stop() {
-        wasPlayingBeforeLostFocus = false
-        player?.pause()
-        window?.orderOut(nil)
-        isPlaying = false
-    }
-    
-    func cleanup() {
-        stopColorSampling()
-        player?.pause()
-        player = nil
-        window?.close()
-        window = nil
-    }
-    
-    func togglePlayback() {
-        if isPlaying {
-            stop()
-        } else if let path = ModelManager.shared.settings?.lastUsedPath,
-                  let url = URL(string: path) {
-            setVideo(url: url)
-            start()
-        }
-    }
-}
-
-// MARK: - Preview Player Manager
-class PreviewPlayerManager: ObservableObject {
-    @MainActor @Published private(set) var previewImage: NSImage?
-    private var player: AVPlayer?
-    private var playerLayer: AVPlayerLayer?
-    private var videoOutput: AVPlayerItemVideoOutput?
-    
-    @MainActor
-    func setupPreview(url: URL, completion: ((Data?) -> Void)? = nil) {
-        let asset = AVAsset(url: url)
-        let imageGenerator = AVAssetImageGenerator(asset: asset)
-        imageGenerator.appliesPreferredTrackTransform = true
-        
-        Task {
-            do {
-                let time = CMTime(seconds: 0, preferredTimescale: 600)
-                let cgImage = try await imageGenerator.image(at: time).image
-                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
-                
-                await MainActor.run {
-                    self.previewImage = nsImage
-                    
-                    if let tiffData = nsImage.tiffRepresentation,
-                       let bitmap = NSBitmapImageRep(data: tiffData),
-                       let thumbnailData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) {
-                        completion?(thumbnailData)
-                    } else {
-                        completion?(nil)
-                    }
-                }
-            } catch {
-                print("Could not generate thumbnail: \(error)")
-                await MainActor.run {
-                    self.previewImage = nil
-                    completion?(nil)
+                setupLooping(for: playerItem)
+            }
+            
+            private func setupLooping(for playerItem: AVPlayerItem) {
+                NotificationCenter.default.removeObserver(self)
+                NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemDidPlayToEndTime,
+                    object: playerItem,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.player?.seek(to: .zero)
+                    self?.player?.play()
                 }
             }
-        }
-        
-        cleanup()
-    }
-    
-    @MainActor
-    func setPreviewFromData(_ data: Data?) {
-        guard let data = data else {
-            previewImage = nil
-            return
-        }
-        
-        if let nsImage = NSImage(data: data) {
-            previewImage = nsImage
-        }
-    }
-    
-    func cleanup() {
-        Task { @MainActor in
-            player?.pause()
-            player = nil
-            playerLayer = nil
-            videoOutput = nil
-        }
-    }
-}
-
-// MARK: - Custom Button Styles
-struct AccentButtonStyle: ButtonStyle {
-    @Environment(\.controlActiveState) private var controlActiveState
-    
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .padding(.vertical, 8)
-            .padding(.horizontal, 16)
-            .background(Color.accentColor.opacity(configuration.isPressed ? 0.8 : 1))
-            .foregroundColor(.white)
-            .cornerRadius(8)
-            .opacity(controlActiveState == .inactive ? 0.5 : 1)
-    }
-}
-
-struct SecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(.primary)
-            .opacity(configuration.isPressed ? 0.7 : 1)
-    }
-}
-
-// MARK: - Content View
-struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @StateObject private var windowManager: WallpaperWindowManager
-    @ObservedObject private var modelManager = ModelManager.shared
-    @StateObject private var previewManager = PreviewPlayerManager()
-    @Environment(\.colorScheme) private var colorScheme
-    
-    init(menuBarController: MenuBarController) {
-        _windowManager = StateObject(wrappedValue: WallpaperWindowManager(menuBarController: menuBarController))
-        menuBarController.setWindowManager(windowManager)
-    }
-    
-    var body: some View {
-        ZStack {
-            // Background
-            Color(nsColor: .windowBackgroundColor)
-                .ignoresSafeArea()
             
-            VStack(spacing: 0) {
-                // Header
-                HStack {
-                    Image(systemName: "sparkles.tv")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.blue)
-                    Text("Live Wallpaper")
-                        .font(.system(size: 20, weight: .semibold))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .background(.ultraThinMaterial)
+            private func pausePlayback() {
+                player?.pause()
+            }
+            
+            private func resumePlayback() {
+                player?.play()
+                wasPlayingBeforeLostFocus = false
+            }
+            
+            func start() {
+                window?.orderFront(nil)
+                player?.play()
+                isPlaying = true
+            }
+            
+            func stop() {
+                wasPlayingBeforeLostFocus = false
+                player?.pause()
+                window?.orderOut(nil)
+                isPlaying = false
+            }
+            
+            func cleanup() {
+                stopColorSampling()
+                player?.pause()
+                player = nil
+                window?.close()
+                window = nil
+            }
+        }
+
+        // MARK: - Preview Player Manager
+        class PreviewPlayerManager: ObservableObject {
+            @MainActor @Published private(set) var previewImage: NSImage?
+            private var player: AVPlayer?
+            private var playerLayer: AVPlayerLayer?
+            private var videoOutput: AVPlayerItemVideoOutput?
+            
+            @MainActor
+            func setupPreview(url: URL, completion: ((Data?) -> Void)? = nil) {
+                let asset = AVAsset(url: url)
+                let imageGenerator = AVAssetImageGenerator(asset: asset)
+                imageGenerator.appliesPreferredTrackTransform = true
                 
-                ScrollView {
-                    VStack(spacing: 24) {
-                        // Preview Card
-                        VStack(spacing: 0) {
-                            if let previewImage = previewManager.previewImage {
-                                Image(nsImage: previewImage)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .frame(height: 160)
-                                    .clipped()
+                Task {
+                    do {
+                        let time = CMTime(seconds: 0, preferredTimescale: 600)
+                        let cgImage = try await imageGenerator.image(at: time).image
+                        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 280, height: 158))
+                        
+                        await MainActor.run {
+                            self.previewImage = nsImage
+                            
+                            if let tiffData = nsImage.tiffRepresentation,
+                               let bitmap = NSBitmapImageRep(data: tiffData),
+                               let thumbnailData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) {
+                                completion?(thumbnailData)
                             } else {
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .fill(Color.gray.opacity(0.1))
-                                    
-                                    VStack(spacing: 8) {
-                                        Image(systemName: "photo.fill")
-                                            .font(.system(size: 32))
-                                            .foregroundColor(.gray)
-                                        Text("No wallpaper selected")
-                                            .font(.system(size: 13))
-                                            .foregroundColor(.gray)
-                                    }
-                                }
-                                .frame(height: 160)
+                                completion?(nil)
                             }
-                            
-                            // Control buttons
-                            HStack(spacing: 16) {
-                                Button(action: chooseVideo) {
-                                    HStack {
-                                        Image(systemName: "plus")
-                                        Text("Choose")
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(ModernButtonStyle(type: .secondary))
-                                
-                                Button(action: togglePlayback) {
-                                    HStack {
-                                        Image(systemName: windowManager.isPlaying ? "stop.fill" : "play.fill")
-                                        Text(windowManager.isPlaying ? "Stop" : "Start")
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(ModernButtonStyle(type: .primary))
-                            }
-                            .padding(12)
                         }
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
-                        
-                        // Settings Section
-                        VStack(spacing: 16) {
-                            Text("Settings")
-                                .font(.system(size: 15, weight: .medium))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            
-                            VStack(spacing: 4) {
-                                ModernToggleRow("Auto-start on launch", systemImage: "clock", isOn: Binding(
-                                    get: { modelManager.settings?.autoStart ?? false },
-                                    set: { updateAutoStart($0) }
-                                ))
-                                
-                                Divider()
-                                
-                                ModernToggleRow("Adaptive menu bar", systemImage: "paintpalette", isOn: Binding(
-                                    get: { modelManager.settings?.adaptiveMenuBar ?? true },
-                                    set: { updateAdaptiveMenuBar($0) }
-                                ))
-                                
-                                Divider()
-                                
-                                ModernToggleRow("Battery limit", systemImage: "battery.75", isOn: Binding(
-                                    get: { modelManager.settings?.batteryLimitEnabled ?? false },
-                                    set: { updateBatteryLimit($0) }
-                                ))
-                                
-                                if modelManager.settings?.batteryLimitEnabled == true {
-                                    VStack(spacing: 8) {
-                                        Divider()
-                                        HStack {
-                                            Image(systemName: "bolt.circle")
-                                                .foregroundStyle(.orange)
-                                            Slider(value: Binding(
-                                                get: { modelManager.settings?.batteryLimitPercentage ?? 20 },
-                                                set: { updateBatteryLimitPercentage($0) }
-                                            ), in: 10...80, step: 5)
-                                            Text("\(Int(modelManager.settings?.batteryLimitPercentage ?? 20))%")
-                                                .monospacedDigit()
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding()
-                            .background(Color(nsColor: .controlBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    } catch {
+                        print("Could not generate thumbnail: \(error)")
+                        await MainActor.run {
+                            self.previewImage = nil
+                            completion?(nil)
                         }
-                        
-                        Button("Quit Application") {
-                            NSApplication.shared.terminate(nil)
-                        }
-                        .buttonStyle(ModernButtonStyle(type: .destructive))
                     }
-                    .padding()
                 }
-            }
-        }
-        .frame(width: 320, height: 480)
-        .onAppear {
-            modelManager.initialize(with: modelContext)
-            handleOnAppear()
-        }
-    }
-    
-    private func handleOnAppear() {
-        previewManager.setPreviewFromData(modelManager.settings?.thumbnailData)
-        loadSavedVideo()
-    }
-    
-    private func chooseVideo() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.movie]
-        panel.allowsMultipleSelection = false
-        
-        panel.begin { response in
-            if response == .OK, let url = panel.url {
-                // Save the file URL as a bookmark for persistent access
-                do {
-                    let bookmarkData = try url.bookmarkData(
-                        options: .withSecurityScope,
-                        includingResourceValuesForKeys: nil,
-                        relativeTo: nil
-                    )
-                    
-                    // Store both the path and bookmark data
-                    modelManager.settings?.lastUsedPath = url.absoluteString
-                    UserDefaults.standard.set(bookmarkData, forKey: "videoBookmark")
-                    
-                    // Update preview and start playback
-                    previewManager.setupPreview(url: url) { thumbnailData in
-                        modelManager.settings?.thumbnailData = thumbnailData
-                        modelManager.updateSettings()
-                    }
-                    windowManager.setVideo(url: url)
-                    windowManager.start()
-                } catch {
-                    print("Failed to create bookmark: \(error)")
-                }
-            }
-        }
-    }
-    
-    private func loadSavedVideo() {
-        if let path = modelManager.settings?.lastUsedPath,
-           let url = URL(string: path),
-           let bookmarkData = UserDefaults.standard.data(forKey: "videoBookmark") {
-            
-            do {
-                var isStale = false
-                let url = try URL(
-                    resolvingBookmarkData: bookmarkData,
-                    options: .withSecurityScope,
-                    relativeTo: nil,
-                    bookmarkDataIsStale: &isStale
-                )
                 
-                // Start accessing the security-scoped resource
-                guard url.startAccessingSecurityScopedResource() else {
-                    print("Failed to access the video file")
+                cleanup()
+            }
+            
+            @MainActor
+            func setPreviewFromData(_ data: Data?) {
+                guard let data = data else {
+                    previewImage = nil
                     return
                 }
                 
-                // Update the UI and start playback if autoStart is enabled
-                previewManager.setPreviewFromData(modelManager.settings?.thumbnailData)
-                windowManager.setVideo(url: url)
+                if let nsImage = NSImage(data: data) {
+                    previewImage = nsImage
+                }
+            }
+            
+            func cleanup() {
+                Task { @MainActor in
+                    player?.pause()
+                    player = nil
+                    playerLayer = nil
+                    videoOutput = nil
+                }
+            }
+        }
+
+
+
+
+        // MARK: - Custom Button Styles
+        struct AccentButtonStyle: ButtonStyle {
+            @Environment(\.controlActiveState) private var controlActiveState
+            
+            func makeBody(configuration: Configuration) -> some View {
+                configuration.label
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 16)
+                    .background(Color.accentColor.opacity(configuration.isPressed ? 0.8 : 1))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                    .opacity(controlActiveState == .inactive ? 0.5 : 1)
+            }
+        }
+
+        struct SecondaryButtonStyle: ButtonStyle {
+            func makeBody(configuration: Configuration) -> some View {
+                configuration.label
+                    .foregroundColor(.primary)
+                    .opacity(configuration.isPressed ? 0.7 : 1)
+            }
+        }
+
+        // MARK: - Content View
+        struct ContentView: View {
+            @Environment(\.modelContext) private var modelContext
+            @StateObject private var windowManager: WallpaperWindowManager
+            @ObservedObject private var modelManager = ModelManager.shared
+            @StateObject private var previewManager = PreviewPlayerManager()
+            @Environment(\.colorScheme) private var colorScheme
+            
+            init(menuBarController: MenuBarController) {
+                _windowManager = StateObject(wrappedValue: WallpaperWindowManager(menuBarController: menuBarController))
+            }
+            
+            var body: some View {
+                VStack(spacing: 16) {
+                    Text("Live Wallpaper 👀")
+                        .font(.system(size: 24, weight: .bold))
+                        .padding(.top, 8)
+                    
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color(nsColor: .windowBackgroundColor))
+                            .frame(height: 158)
+                        
+                        Group {
+                            if let previewImage = previewManager.previewImage {
+                                Image(nsImage: previewImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(maxWidth: 280, maxHeight: 158)
+                                    .cornerRadius(8)
+                            } else {
+                                VStack {
+                                    Image(systemName: "photo.fill")
+                                        .font(.system(size: 30))
+                                        .foregroundColor(.gray)
+                                    Text("No wallpaper selected")
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    
+                    HStack(spacing: 12) {
+                        Button(action: chooseVideo) {
+                            Label("Choose", systemImage: "plus.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(AccentButtonStyle())
+                        
+                        Button(action: togglePlayback) {
+                            Label(
+                                windowManager.isPlaying ? "Stop" : "Start",
+                                systemImage: windowManager.isPlaying ? "stop.fill" : "play.fill"
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(AccentButtonStyle())
+                    }
+                    .padding(.horizontal)
+                    
+                    VStack(spacing: 8) {
+                        Toggle("Auto-start on launch", isOn: Binding(
+                            get: { modelManager.settings?.autoStart ?? false },
+                            set: { updateAutoStart($0) }
+                        ))
+                        
+                        Toggle("Adaptive menu bar color", isOn: Binding(
+                            get: { modelManager.settings?.adaptiveMenuBar ?? true },
+                            set: { updateAdaptiveMenuBar($0) }
+                        ))
+                        
+                        Toggle("Stop when battery is low", isOn: Binding(
+                            get: { modelManager.settings?.batteryLimitEnabled ?? false },
+                            set: { updateBatteryLimit($0) }
+                        ))
+                        
+                        if modelManager.settings?.batteryLimitEnabled == true {
+                            HStack {
+                                Slider(value: Binding(
+                                    get: { modelManager.settings?.batteryLimitPercentage ?? 20 },
+                                    set: { updateBatteryLimitPercentage($0) }
+                                ), in: 10...80, step: 5)
+                                .accentColor(.accentColor)
+                                
+                                Text("\(Int(modelManager.settings?.batteryLimitPercentage ?? 20))%")
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 45, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 4)
+                        }
+                    }
+                    .padding(.horizontal)
+                    
+                    Divider()
+                        .padding(.vertical, 8)
+                    
+                    Button("Quit Application") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                    .buttonStyle(BorderedButtonStyle())
+                    
+                    Text("Made with ❤️ by octexa")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .fontWeight(.bold)
+                    
+                    Text("Version 1.0.0")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .padding(.bottom, 2)
+                        .fontWeight(.bold)
+                    
+                    Text("Under Development Bugs may Occur")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.accentColor)
+                        .padding(.bottom, 8)
+                }
+                .frame(width: 320)
+                .onAppear {
+                    modelManager.initialize(with: modelContext)
+                    handleOnAppear()
+                }
+            }
+            
+            private func chooseVideo() {
+                let panel = NSOpenPanel()
+                panel.allowedContentTypes = [.movie]
+                panel.allowsMultipleSelection = false
                 
-                if modelManager.settings?.autoStart == true {
+                panel.begin { response in
+                    if response == .OK, let url = panel.url {
+                        modelManager.settings?.lastUsedPath = url.absoluteString
+                        previewManager.setupPreview(url: url) { thumbnailData in
+                            modelManager.settings?.thumbnailData = thumbnailData
+                            modelManager.updateSettings()
+                        }
+                        windowManager.setVideo(url: url)
+                        windowManager.start()
+                    }
+                }
+            }
+            
+            private func handleOnAppear() {
+                previewManager.setPreviewFromData(modelManager.settings?.thumbnailData)
+                
+                if let path = modelManager.settings?.lastUsedPath,
+                   let url = URL(string: path),
+                   modelManager.settings?.autoStart == true {
+                    windowManager.setVideo(url: url)
                     windowManager.start()
                 }
-                
-                // Stop accessing the security-scoped resource when done
-                url.stopAccessingSecurityScopedResource()
-            } catch {
-                print("Failed to resolve bookmark: \(error)")
-            }
-        }
-    }
-    
-    private func togglePlayback() {
-        if windowManager.isPlaying {
-            windowManager.stop()
-        } else if let path = modelManager.settings?.lastUsedPath,
-                  let url = URL(string: path) {
-            windowManager.setVideo(url: url)
-            windowManager.start()
-        }
-    }
-    
-    private func updateAutoStart(_ value: Bool) {
-        modelManager.settings?.autoStart = value
-        modelManager.updateSettings()
-    }
-    
-    private func updateAdaptiveMenuBar(_ value: Bool) {
-        modelManager.settings?.adaptiveMenuBar = value
-        modelManager.updateSettings()
-    }
-    
-    private func updateBatteryLimit(_ value: Bool) {
-        modelManager.settings?.batteryLimitEnabled = value
-        modelManager.updateSettings()
-    }
-    
-    private func updateBatteryLimitPercentage(_ value: Double) {
-        modelManager.settings?.batteryLimitPercentage = value
-        modelManager.updateSettings()
-    }
-}
-
-// MARK: - App Entry Point
-@main
-struct LiveWallpaperApp: App {
-    let modelContainer: ModelContainer
-    @StateObject private var menuBarController = MenuBarController()
-    
-    init() {
-        self.modelContainer = PersistenceManager.shared.createContainer()
-        NSWindow.allowsAutomaticWindowTabbing = false
-        
-        // Configure the app to run as a menu bar app
-        NSApplication.shared.setActivationPolicy(.accessory)
-    }
-    
-    var body: some Scene {
-        MenuBarExtra {
-            Button("Open Settings") {
-                print("Open Settings clicked")
-                menuBarController.showSettings()
             }
             
-            Button(menuBarController.isPlaying ? "Stop Wallpaper" : "Start Wallpaper") {
-                menuBarController.togglePlayback()
-            }
-            
-            Divider()
-            
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
-        } label: {
-            Image(systemName: "photo.fill")
-                .imageScale(.large)
-        }
-        
-        WindowGroup {
-            ContentView(menuBarController: menuBarController)
-                .modelContainer(modelContainer)
-                .frame(width: 320, height: 480)
-                .background(VisualEffectView())
-                .onAppear {
-                    print("ContentView appeared")
-                    setupWindow()
+            private func togglePlayback() {
+                if windowManager.isPlaying {
+                    windowManager.stop()
+                } else if let path = modelManager.settings?.lastUsedPath,
+                          let url = URL(string: path) {
+                    windowManager.setVideo(url: url)
+                    windowManager.start()
                 }
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-    }
-    
-    private func setupWindow() {
-        print("Setting up window")
-        DispatchQueue.main.async {
-            if let window = NSApplication.shared.windows.first {
-                print("Found window to configure")
-                // Configure window
-                window.styleMask = [.titled, .closable, .miniaturizable]
-                window.title = "Live Wallpaper Settings"
-                window.center()
-                window.isReleasedWhenClosed = false
-                window.setFrame(NSRect(x: 0, y: 0, width: 320, height: 480), display: false)
-                window.center()
-                window.makeKey()
-                
-                // Set up close button
-                window.standardWindowButton(.closeButton)?.target = window
-                window.standardWindowButton(.closeButton)?.action = #selector(NSWindow.miniaturize(_:))
-                
-                // Store window reference
-                menuBarController.setWindow(window)
-                
-                // Hide window initially
-                window.orderOut(nil)
-                print("Window configured and hidden successfully")
-            } else {
-                print("No window found to configure")
+            }
+            
+            private func updateAutoStart(_ value: Bool) {
+                modelManager.settings?.autoStart = value
+                modelManager.updateSettings()
+            }
+            
+            private func updateAdaptiveMenuBar(_ value: Bool) {
+                modelManager.settings?.adaptiveMenuBar = value
+                modelManager.updateSettings()
+            }
+            
+            private func updateBatteryLimit(_ value: Bool) {
+                modelManager.settings?.batteryLimitEnabled = value
+                modelManager.updateSettings()
+            }
+            
+            private func updateBatteryLimitPercentage(_ value: Double) {
+                modelManager.settings?.batteryLimitPercentage = value
+                modelManager.updateSettings()
             }
         }
-    }
-}
 
-// Modern Button Types and Styles
-enum ModernButtonType {
-    case primary, secondary, destructive
-    
-    var backgroundColor: Color {
-        switch self {
-        case .primary: return .blue
-        case .secondary: return .gray.opacity(0.15)
-        case .destructive: return .red.opacity(0.15)
+        // MARK: - Main Scene
+        struct MainScene: Scene {
+            @StateObject private var menuBarController = MenuBarController()
+            let modelContainer: ModelContainer
+            
+            var body: some Scene {
+                MenuBarExtra {
+                    ContentView(menuBarController: menuBarController)
+                        .modelContainer(modelContainer)
+                } label: {
+                    Text("👀")
+                }
+                .menuBarExtraStyle(.window)
+            }
         }
-    }
-    
-    var foregroundColor: Color {
-        switch self {
-        case .primary: return .white
-        case .secondary: return .primary
-        case .destructive: return .red
+
+        // MARK: - App Entry Point
+        @main
+        struct LiveWallpaperApp: App {
+            let modelContainer: ModelContainer
+            
+            init() {
+                self.modelContainer = PersistenceManager.shared.createContainer()
+            }
+            
+            var body: some Scene {
+                MainScene(modelContainer: modelContainer)
+            }
         }
-    }
-}
-
-struct ModernButtonStyle: ButtonStyle {
-    let type: ModernButtonType
-    
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .medium))
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(type.backgroundColor.opacity(configuration.isPressed ? 0.8 : 1))
-            .foregroundColor(type.foregroundColor)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-struct ModernToggleRow: View {
-    let title: String
-    let systemImage: String
-    @Binding var isOn: Bool
-    
-    init(_ title: String, systemImage: String, isOn: Binding<Bool>) {
-        self.title = title
-        self.systemImage = systemImage
-        self._isOn = isOn
-    }
-    
-    var body: some View {
-        HStack {
-            Image(systemName: systemImage)
-                .foregroundStyle(.blue)
-            Text(title)
-                .font(.system(size: 13))
-            Spacer()
-            Toggle("", isOn: $isOn)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-// Add this new ViewRepresentable for the window background
-struct VisualEffectView: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.blendingMode = .behindWindow
-        view.state = .active
-        view.material = .windowBackground
-        return view
-    }
-    
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
